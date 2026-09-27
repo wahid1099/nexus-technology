@@ -8,18 +8,64 @@ const Input = z.object({
   business: z.string().trim().max(120).optional().default(""),
 });
 
+function buildSampleReply(scenario: string, tone: z.infer<typeof Input>["tone"], business: string) {
+  const normalized = scenario.toLowerCase();
+  const greeting = {
+    Friendly: "Hi there, thanks for reaching out!",
+    Professional: "Hello, thank you for contacting us.",
+    Empathetic: "I'm sorry you're dealing with this.",
+    Concise: "Thanks for letting us know.",
+  }[tone];
+  const supportTeam = business ? `${business} support` : "our support team";
+
+  if (
+    normalized.includes("order") ||
+    normalized.includes("package") ||
+    normalized.includes("deliver")
+  ) {
+    return `${greeting} I'll check the latest delivery update with ${supportTeam}. Could you share your order number?`;
+  }
+  if (
+    normalized.includes("charge") ||
+    normalized.includes("billing") ||
+    normalized.includes("subscription")
+  ) {
+    return `${greeting} I'll review the billing details with ${supportTeam}. Could you share the email on your account and the dates of the charges?`;
+  }
+  if (
+    normalized.includes("return") ||
+    normalized.includes("exchange") ||
+    normalized.includes("size")
+  ) {
+    return `${greeting} I can help with a return or exchange. Could you share your order number and preferred option?`;
+  }
+  return `${greeting} I'll look into this with ${supportTeam} and follow up with the best next step. Could you share any relevant order or account details?`;
+}
+
 export const generateReply = createServerFn({ method: "POST" })
   .inputValidator((d: unknown) => Input.parse(d))
   .handler(async ({ data }) => {
     const key = process.env["LOVABLE_API_KEY"];
-    if (!key) return { ok: false as const, error: "AI is not configured yet." };
+    if (!key) {
+      return {
+        ok: true as const,
+        reply: buildSampleReply(data.scenario, data.tone, data.business),
+        sample: true as const,
+      };
+    }
 
     let facts = "";
     try {
       const snap = await fetchWorkspaceSnapshot();
-      const orders = snap.orders.map((o) => `- Order ${o.number}: ${o.status}${o.expected ? `, expected ${o.expected}` : ""}`).join("\n");
+      const orders = snap.orders
+        .map(
+          (o) => `- Order ${o.number}: ${o.status}${o.expected ? `, expected ${o.expected}` : ""}`,
+        )
+        .join("\n");
       const kb = snap.knowledge.map((k) => `### ${k.title}\n${k.body}`).join("\n\n");
-      facts = [orders && `ORDERS\n${orders}`, kb && `KNOWLEDGE BASE\n${kb}`].filter(Boolean).join("\n\n");
+      facts = [orders && `ORDERS\n${orders}`, kb && `KNOWLEDGE BASE\n${kb}`]
+        .filter(Boolean)
+        .join("\n\n");
     } catch (e) {
       console.error("could not load workspace facts", e);
     }
@@ -49,15 +95,18 @@ ${facts || "(No workspace data has been added yet.)"}`;
 
     if (!res.ok || !res.body) {
       const msg =
-        res.status === 429 ? "Too many requests right now — please try again in a moment."
-        : res.status === 402 ? "AI credits are used up for this workspace."
-        : `The AI couldn't respond (error ${res.status}).`;
+        res.status === 429
+          ? "Too many requests right now — please try again in a moment."
+          : res.status === 402
+            ? "AI credits are used up for this workspace."
+            : `The AI couldn't respond (error ${res.status}).`;
       return { ok: false as const, error: msg };
     }
 
     const reader = res.body.getReader();
     const dec = new TextDecoder();
-    let buf = "", text = "";
+    let buf = "",
+      text = "";
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -71,10 +120,16 @@ ${facts || "(No workspace data has been added yet.)"}`;
         try {
           const ev = JSON.parse(payload);
           if (ev.type === "response.output_text.delta") text += ev.delta;
-        } catch { /* ignore */ }
+        } catch {
+          /* ignore */
+        }
       }
     }
     text = text.trim();
-    if (!text) return { ok: false as const, error: "The AI returned an empty reply. Try rephrasing the scenario." };
-    return { ok: true as const, reply: text };
+    if (!text)
+      return {
+        ok: false as const,
+        error: "The AI returned an empty reply. Try rephrasing the scenario.",
+      };
+    return { ok: true as const, reply: text, sample: false as const };
   });
